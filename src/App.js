@@ -1,23 +1,46 @@
-import logo from './logo.svg';
+import React, { useState } from 'react';
 import './App.css';
+import LandingPage from './components/LandingPage';
+import VideoCall from './components/VideoCall';
 
 function App() {
+  const [currentView, setCurrentView] = useState('landing');
+  const [meetingId, setMeetingId] = useState('');
+  const [username, setUsername] = useState('');
+
+  const handleCreateMeeting = (newMeetingId, newUsername) => {
+    setMeetingId(newMeetingId);
+    setUsername(newUsername);
+    setCurrentView('video-call');
+  };
+
+  const handleJoinMeeting = (newMeetingId, newUsername) => {
+    setMeetingId(newMeetingId);
+    setUsername(newUsername);
+    setCurrentView('video-call');
+  };
+
+  const handleLeaveCall = () => {
+    setCurrentView('landing');
+    setMeetingId('');
+    setUsername('');
+  };
+
   return (
     <div className="App">
-      <header className="App-header">
-        <img src={logo} className="App-logo" alt="logo" />
-        <p>
-          Edit <code>src/App.js</code> and save to reload.
-        </p>
-        <a
-          className="App-link"
-          href="https://reactjs.org"
-          target="_blank"
-          rel="noopener noreferrer"
-        >
-          Learn React
-        </a>
-      </header>
+      {currentView === 'landing' && (
+        <LandingPage
+          onCreateMeeting={handleCreateMeeting}
+          onJoinMeeting={handleJoinMeeting}
+        />
+      )}
+      {currentView === 'video-call' && (
+        <VideoCall
+          meetingId={meetingId}
+          username={username}
+          onLeaveCall={handleLeaveCall}
+        />
+      )}
     </div>
   );
 }
