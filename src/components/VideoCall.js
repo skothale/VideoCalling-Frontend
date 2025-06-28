@@ -210,8 +210,7 @@ const VideoCall = ({ meetingId, username, onLeaveCall }) => {
     if (hasJoinedRef.current) return;
     hasJoinedRef.current = true;
 
-    const wsUrl = BACKEND_URL.replace(/^https?:\/\//, 'wss://').replace(/^http:\/\//, 'ws://');
-    const client = Stomp.over(new SockJS(`${wsUrl}/ws`));
+    const client = Stomp.over(new SockJS(`${BACKEND_URL}/ws`));
     
     client.connect({}, () => {
       setStompClient(client);
