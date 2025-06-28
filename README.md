@@ -68,4 +68,28 @@ This section has moved here: [https://facebook.github.io/create-react-app/docs/d
 ### `npm run build` fails to minify
 
 This section has moved here: [https://facebook.github.io/create-react-app/docs/troubleshooting#npm-run-build-fails-to-minify](https://facebook.github.io/create-react-app/docs/troubleshooting#npm-run-build-fails-to-minify)
-# VideoCalling Frontend
+
+# Video Calling App Frontend
+
+A React-based video calling application with WebRTC support.
+
+## Features
+
+- Real-time video calling
+- WebRTC peer connections
+- Screen sharing
+- Chat functionality
+- Google Meet-like interface
+
+## Development
+
+```bash
+npm install
+npm start
+```
+
+## Deployment
+
+This app is deployed on Vercel and automatically redeploys on git push.
+
+<!-- Trigger redeploy with debugging logs -->
