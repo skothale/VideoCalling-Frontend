@@ -16,9 +16,12 @@ const VideoCall = ({ meetingId, username, onLeaveCall }) => {
   const [chatInput, setChatInput] = useState('');
   const [showChat, setShowChat] = useState(false);
   const [stompClient, setStompClient] = useState(null);
+  const [isConnecting, setIsConnecting] = useState(false);
 
   const localVideoRef = useRef(null);
   const chatEndRef = useRef(null);
+  const screenStreamRef = useRef(null);
+  const hasJoinedRef = useRef(false);
 
   // Initialize media stream
   useEffect(() => {
@@ -44,57 +47,62 @@ const VideoCall = ({ meetingId, username, onLeaveCall }) => {
       if (localStream) {
         localStream.getTracks().forEach(track => track.stop());
       }
+      if (screenStreamRef.current) {
+        screenStreamRef.current.getTracks().forEach(track => track.stop());
+      }
     };
   }, []);
 
-  // Connect to WebSocket
-  useEffect(() => {
-    const client = Stomp.over(new SockJS(`${BACKEND_URL.replace('http', 'ws')}/ws`));
-    
-    client.connect({}, () => {
-      setStompClient(client);
-      
-      // Subscribe to signaling
-      client.subscribe('/topic/signal', (message) => {
-        const data = JSON.parse(message.body);
-        handleSignal(data);
+  // WebRTC signaling handlers
+  const handleOffer = useCallback(async (from, offer) => {
+    if (peers[from]) {
+      console.log('Peer connection already exists for:', from);
+      return;
+    }
+
+    const pc = createPeerConnection(from);
+    setPeers(prev => ({ ...prev, [from]: pc }));
+
+    try {
+      await pc.setRemoteDescription(new RTCSessionDescription(offer));
+      const answer = await pc.createAnswer();
+      await pc.setLocalDescription(answer);
+
+      stompClient?.publish({
+        destination: '/app/signal',
+        body: JSON.stringify({
+          from: username,
+          to: from,
+          type: 'answer',
+          payload: answer
+        })
       });
+    } catch (error) {
+      console.error('Error handling offer:', error);
+    }
+  }, [peers, username, stompClient]);
 
-      // Subscribe to chat
-      client.subscribe('/topic/chat', (message) => {
-        const data = JSON.parse(message.body);
-        setChatMessages(prev => [...prev, data]);
-      });
-
-      // Subscribe to user join/leave
-      client.subscribe('/topic/join', (message) => {
-        const newUser = message.body;
-        setUserList(prev => prev.includes(newUser) ? prev : [...prev, newUser]);
-      });
-
-      client.subscribe('/topic/leave', (message) => {
-        const leftUser = message.body;
-        setUserList(prev => prev.filter(user => user !== leftUser));
-        if (remoteStreams[leftUser]) {
-          setRemoteStreams(prev => {
-            const newStreams = { ...prev };
-            delete newStreams[leftUser];
-            return newStreams;
-          });
-        }
-      });
-
-      // Join the meeting
-      client.publish({ destination: '/app/join', body: username });
-    });
-
-    return () => {
-      if (client.connected) {
-        client.publish({ destination: '/app/leave', body: username });
-        client.disconnect();
+  const handleAnswer = useCallback(async (from, answer) => {
+    const pc = peers[from];
+    if (pc) {
+      try {
+        await pc.setRemoteDescription(new RTCSessionDescription(answer));
+      } catch (error) {
+        console.error('Error handling answer:', error);
       }
-    };
-  }, [meetingId, username]);
+    }
+  }, [peers]);
+
+  const handleIceCandidate = useCallback(async (from, candidate) => {
+    const pc = peers[from];
+    if (pc) {
+      try {
+        await pc.addIceCandidate(new RTCIceCandidate(candidate));
+      } catch (error) {
+        console.error('Error adding ICE candidate:', error);
+      }
+    }
+  }, [peers]);
 
   // WebRTC signaling
   const handleSignal = useCallback((data) => {
@@ -112,10 +120,12 @@ const VideoCall = ({ meetingId, username, onLeaveCall }) => {
       case 'ice-candidate':
         handleIceCandidate(from, payload);
         break;
+      default:
+        console.log('Unknown signal type:', type);
     }
-  }, [username]);
+  }, [username, handleOffer, handleAnswer, handleIceCandidate]);
 
-  const createPeerConnection = (userId) => {
+  const createPeerConnection = useCallback((userId) => {
     const pc = new RTCPeerConnection({
       iceServers: [
         { urls: 'stun:stun.l.google.com:19302' },
@@ -124,7 +134,7 @@ const VideoCall = ({ meetingId, username, onLeaveCall }) => {
     });
 
     pc.onicecandidate = (event) => {
-      if (event.candidate) {
+      if (event.candidate && stompClient) {
         stompClient.publish({
           destination: '/app/signal',
           body: JSON.stringify({
@@ -144,6 +154,23 @@ const VideoCall = ({ meetingId, username, onLeaveCall }) => {
       }));
     };
 
+    pc.oniceconnectionstatechange = () => {
+      console.log(`ICE connection state for ${userId}:`, pc.iceConnectionState);
+      if (pc.iceConnectionState === 'failed' || pc.iceConnectionState === 'disconnected') {
+        setPeers(prev => {
+          const newPeers = { ...prev };
+          delete newPeers[userId];
+          return newPeers;
+        });
+        setRemoteStreams(prev => {
+          const newStreams = { ...prev };
+          delete newStreams[userId];
+          return newStreams;
+        });
+      }
+    };
+
+    // Add local stream tracks
     if (localStream) {
       localStream.getTracks().forEach(track => {
         pc.addTrack(track, localStream);
@@ -151,98 +178,155 @@ const VideoCall = ({ meetingId, username, onLeaveCall }) => {
     }
 
     return pc;
-  };
-
-  const handleOffer = async (from, offer) => {
-    const pc = createPeerConnection(from);
-    setPeers(prev => ({ ...prev, [from]: pc }));
-
-    await pc.setRemoteDescription(new RTCSessionDescription(offer));
-    const answer = await pc.createAnswer();
-    await pc.setLocalDescription(answer);
-
-    stompClient.publish({
-      destination: '/app/signal',
-      body: JSON.stringify({
-        from: username,
-        to: from,
-        type: 'answer',
-        payload: answer
-      })
-    });
-  };
-
-  const handleAnswer = async (from, answer) => {
-    const pc = peers[from];
-    if (pc) {
-      await pc.setRemoteDescription(new RTCSessionDescription(answer));
-    }
-  };
-
-  const handleIceCandidate = async (from, candidate) => {
-    const pc = peers[from];
-    if (pc) {
-      await pc.addIceCandidate(new RTCIceCandidate(candidate));
-    }
-  };
+  }, [localStream, username, stompClient]);
 
   // Connect to new users
+  const connectToUser = useCallback(async (userId) => {
+    if (userId === username || peers[userId] || !stompClient) return;
+
+    const pc = createPeerConnection(userId);
+    setPeers(prev => ({ ...prev, [userId]: pc }));
+
+    try {
+      const offer = await pc.createOffer();
+      await pc.setLocalDescription(offer);
+
+      stompClient.publish({
+        destination: '/app/signal',
+        body: JSON.stringify({
+          from: username,
+          to: userId,
+          type: 'offer',
+          payload: offer
+        })
+      });
+    } catch (error) {
+      console.error('Error creating offer:', error);
+    }
+  }, [username, peers, stompClient, createPeerConnection]);
+
+  // Connect to WebSocket
+  useEffect(() => {
+    if (hasJoinedRef.current) return;
+    hasJoinedRef.current = true;
+
+    const wsUrl = BACKEND_URL.replace(/^https?:\/\//, 'wss://').replace(/^http:\/\//, 'ws://');
+    const client = Stomp.over(new SockJS(`${wsUrl}/ws`));
+    
+    client.connect({}, () => {
+      setStompClient(client);
+      setIsConnecting(false);
+      
+      // Subscribe to signaling
+      client.subscribe('/topic/signal', (message) => {
+        try {
+          const data = JSON.parse(message.body);
+          handleSignal(data);
+        } catch (error) {
+          console.error('Error parsing signal message:', error);
+        }
+      });
+
+      // Subscribe to chat
+      client.subscribe('/topic/chat', (message) => {
+        try {
+          const data = JSON.parse(message.body);
+          setChatMessages(prev => [...prev, data]);
+        } catch (error) {
+          console.error('Error parsing chat message:', error);
+        }
+      });
+
+      // Subscribe to user join/leave
+      client.subscribe('/topic/join', (message) => {
+        const newUser = message.body;
+        if (newUser !== username) {
+          setUserList(prev => prev.includes(newUser) ? prev : [...prev, newUser]);
+          connectToUser(newUser);
+        }
+      });
+
+      client.subscribe('/topic/leave', (message) => {
+        const leftUser = message.body;
+        setUserList(prev => prev.filter(user => user !== leftUser));
+        
+        // Clean up peer connection
+        if (peers[leftUser]) {
+          peers[leftUser].close();
+          setPeers(prev => {
+            const newPeers = { ...prev };
+            delete newPeers[leftUser];
+            return newPeers;
+          });
+        }
+        
+        // Clean up remote stream
+        setRemoteStreams(prev => {
+          const newStreams = { ...prev };
+          delete newStreams[leftUser];
+          return newStreams;
+        });
+      });
+
+      // Join the meeting
+      client.publish({ destination: '/app/join', body: username });
+    }, (error) => {
+      console.error('WebSocket connection error:', error);
+      setIsConnecting(false);
+    });
+
+    return () => {
+      if (client.connected) {
+        client.publish({ destination: '/app/leave', body: username });
+        client.disconnect();
+      }
+    };
+  }, [meetingId, username, handleSignal, connectToUser, peers]);
+
+  // Connect to existing users when userList changes
   useEffect(() => {
     userList.forEach(userId => {
-      if (userId !== username && !peers[userId]) {
-        const pc = createPeerConnection(userId);
-        setPeers(prev => ({ ...prev, [userId]: pc }));
-
-        pc.createOffer().then(offer => {
-          return pc.setLocalDescription(offer);
-        }).then(() => {
-          stompClient.publish({
-            destination: '/app/signal',
-            body: JSON.stringify({
-              from: username,
-              to: userId,
-              type: 'offer',
-              payload: pc.localDescription
-            })
-          });
-        });
+      if (userId !== username) {
+        connectToUser(userId);
       }
     });
-  }, [userList, username, peers, stompClient, localStream]);
+  }, [userList, connectToUser, username]);
 
   // Controls
-  const toggleMute = () => {
+  const toggleMute = useCallback(() => {
     if (localStream) {
       localStream.getAudioTracks().forEach(track => {
         track.enabled = !track.enabled;
       });
       setIsMuted(!isMuted);
     }
-  };
+  }, [localStream, isMuted]);
 
-  const toggleVideo = () => {
+  const toggleVideo = useCallback(() => {
     if (localStream) {
       localStream.getVideoTracks().forEach(track => {
         track.enabled = !track.enabled;
       });
       setIsVideoOff(!isVideoOff);
     }
-  };
+  }, [localStream, isVideoOff]);
 
-  const toggleScreenShare = async () => {
+  const toggleScreenShare = useCallback(async () => {
     if (!isScreenSharing) {
       try {
         const screenStream = await navigator.mediaDevices.getDisplayMedia({
           video: true
         });
         
+        screenStreamRef.current = screenStream;
         const videoTrack = screenStream.getVideoTracks()[0];
-        const senders = Object.values(peers).map(pc => 
-          pc.getSenders().find(sender => sender.track?.kind === 'video')
-        );
-
-        senders.forEach(sender => {
-          if (sender) sender.replaceTrack(videoTrack);
+        
+        // Replace video track in all peer connections
+        Object.values(peers).forEach(pc => {
+          const sender = pc.getSenders().find(s => s.track?.kind === 'video');
+          if (sender) {
+            sender.replaceTrack(videoTrack);
+          }
         });
 
         setIsScreenSharing(true);
@@ -254,20 +338,27 @@ const VideoCall = ({ meetingId, username, onLeaveCall }) => {
         console.error('Error sharing screen:', error);
       }
     } else {
-      const videoTrack = localStream.getVideoTracks()[0];
-      const senders = Object.values(peers).map(pc => 
-        pc.getSenders().find(sender => sender.track?.kind === 'video')
-      );
+      if (localStream) {
+        const videoTrack = localStream.getVideoTracks()[0];
+        
+        Object.values(peers).forEach(pc => {
+          const sender = pc.getSenders().find(s => s.track?.kind === 'video');
+          if (sender) {
+            sender.replaceTrack(videoTrack);
+          }
+        });
+      }
 
-      senders.forEach(sender => {
-        if (sender) sender.replaceTrack(videoTrack);
-      });
+      if (screenStreamRef.current) {
+        screenStreamRef.current.getTracks().forEach(track => track.stop());
+        screenStreamRef.current = null;
+      }
 
       setIsScreenSharing(false);
     }
-  };
+  }, [isScreenSharing, peers, localStream]);
 
-  const sendChatMessage = () => {
+  const sendChatMessage = useCallback(() => {
     if (chatInput.trim() && stompClient) {
       const message = {
         username,
@@ -282,30 +373,50 @@ const VideoCall = ({ meetingId, username, onLeaveCall }) => {
       
       setChatInput('');
     }
-  };
+  }, [chatInput, stompClient, username]);
 
-  const handleLeaveCall = () => {
+  const handleLeaveCall = useCallback(() => {
+    // Stop all media streams
     if (localStream) {
       localStream.getTracks().forEach(track => track.stop());
     }
     
+    if (screenStreamRef.current) {
+      screenStreamRef.current.getTracks().forEach(track => track.stop());
+    }
+    
+    // Close all peer connections
     Object.values(peers).forEach(pc => pc.close());
     
+    // Disconnect WebSocket
     if (stompClient && stompClient.connected) {
       stompClient.publish({ destination: '/app/leave', body: username });
       stompClient.disconnect();
     }
     
     onLeaveCall();
-  };
+  }, [localStream, peers, stompClient, username, onLeaveCall]);
 
   // Auto-scroll chat
   useEffect(() => {
     chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [chatMessages]);
 
+  // Update local video when stream changes
+  useEffect(() => {
+    if (localVideoRef.current && localStream) {
+      localVideoRef.current.srcObject = localStream;
+    }
+  }, [localStream]);
+
   return (
     <div className="video-call">
+      {isConnecting && (
+        <div className="connecting-overlay">
+          <div className="connecting-spinner">Connecting...</div>
+        </div>
+      )}
+      
       <div className="video-container">
         <div className="video-grid">
           <div className="video-item local">
@@ -320,6 +431,7 @@ const VideoCall = ({ meetingId, username, onLeaveCall }) => {
               {username} (You)
               {isMuted && <span className="mute-indicator">🔇</span>}
               {isVideoOff && <span className="video-off-indicator">📷</span>}
+              {isScreenSharing && <span className="screen-share-indicator">🖥️</span>}
             </div>
           </div>
           
