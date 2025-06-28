@@ -106,18 +106,26 @@ const VideoCall = ({ meetingId, username, onLeaveCall }) => {
 
   // WebRTC signaling
   const handleSignal = useCallback((data) => {
+    console.log('Received signal:', data);
     const { from, to, type, payload } = data;
     
-    if (to !== username) return;
+    if (to !== username) {
+      console.log('Signal not for this user, ignoring');
+      return;
+    }
 
+    console.log('Processing signal type:', type, 'from:', from);
     switch (type) {
       case 'offer':
+        console.log('Handling offer from:', from);
         handleOffer(from, payload);
         break;
       case 'answer':
+        console.log('Handling answer from:', from);
         handleAnswer(from, payload);
         break;
       case 'ice-candidate':
+        console.log('Handling ICE candidate from:', from);
         handleIceCandidate(from, payload);
         break;
       default:
@@ -182,15 +190,22 @@ const VideoCall = ({ meetingId, username, onLeaveCall }) => {
 
   // Connect to new users
   const connectToUser = useCallback(async (userId) => {
-    if (userId === username || peers[userId] || !stompClient) return;
+    console.log('connectToUser called for:', userId, 'Current user:', username);
+    if (userId === username || peers[userId] || !stompClient) {
+      console.log('Skipping connection - same user or already connected or no stompClient');
+      return;
+    }
 
+    console.log('Creating peer connection for:', userId);
     const pc = createPeerConnection(userId);
     setPeers(prev => ({ ...prev, [userId]: pc }));
 
     try {
+      console.log('Creating offer for:', userId);
       const offer = await pc.createOffer();
       await pc.setLocalDescription(offer);
 
+      console.log('Sending offer to:', userId);
       stompClient.publish({
         destination: '/app/signal',
         body: JSON.stringify({
@@ -239,8 +254,14 @@ const VideoCall = ({ meetingId, username, onLeaveCall }) => {
       // Subscribe to user join/leave
       client.subscribe('/topic/join', (message) => {
         const newUser = message.body;
+        console.log('User joined:', newUser, 'Current user:', username);
         if (newUser !== username) {
-          setUserList(prev => prev.includes(newUser) ? prev : [...prev, newUser]);
+          setUserList(prev => {
+            const updated = prev.includes(newUser) ? prev : [...prev, newUser];
+            console.log('Updated user list:', updated);
+            return updated;
+          });
+          console.log('Attempting to connect to user:', newUser);
           connectToUser(newUser);
         }
       });
